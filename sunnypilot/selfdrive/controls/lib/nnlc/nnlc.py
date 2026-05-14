@@ -19,7 +19,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.nnlc.helpers import MOCK_MODEL_
 from openpilot.sunnypilot.selfdrive.controls.lib.nnlc.model import NNTorqueModel
 
 LOW_SPEED_X = [0, 10, 20, 30]
-LOW_SPEED_Y = [4.5, 1.0, 0.25, 0]
+LOW_SPEED_Y = [5.5, 1.3, 0.4, 0]
 
 # Measurement low-pass tau (seconds) vs v_ego. Higher tau at low speed suppresses
 # sensor noise that drives PID ping-pong; near-zero at hwy preserves tracking.
@@ -34,9 +34,9 @@ OUTPUT_SLEW_UNWIND_V = [0.040, 0.040]                  # loose unwind - fast ret
 
 # Anti-windup integrator decay: when error opposes integrator for N frames, bleed I.
 # Kills long-period oscillation where integrator winds up against slew-limited output.
-INTEGRATOR_DECAY_FRAMES = 20
+INTEGRATOR_DECAY_FRAMES = 40                            # was 20 - trigger only on sustained opposition
 INTEGRATOR_DECAY_BP = [1.0, 5.0, 15.0, 30.0]
-INTEGRATOR_DECAY_V = [0.985, 0.990, 0.995, 0.999]      # multiplier per frame once triggered
+INTEGRATOR_DECAY_V = [0.995, 0.997, 0.998, 0.9995]     # softer bleed - was [0.985, 0.99, 0.995, 0.999]
 
 # Turn-exit hard reset: when planner ends a turn (|desired_curvature| drops from real
 # turn magnitude toward zero), bleed integrator immediately so it can't keep pushing the
@@ -124,18 +124,20 @@ class NeuralNetworkLateralControl(LatControlTorqueExtBase):
                                   feedforward=self._ff,
                                   speed=CS.vEgo,
                                   freeze_integrator=freeze_integrator)
-    if (self._pid.i > 0 and self._pid_log.error < 0) or (self._pid.i < 0 and self._pid_log.error > 0):
+    # only decay I when actually integrating - never during freeze (e.g. stop) or
+    # the integrator drains during long stops and the car launches with weak torque
+    if not freeze_integrator and ((self._pid.i > 0 and self._pid_log.error < 0) or (self._pid.i < 0 and self._pid_log.error > 0)):
       self._integrator_decay_counter = min(self._integrator_decay_counter + 1, INTEGRATOR_DECAY_FRAMES + 10)
     else:
       self._integrator_decay_counter = 0
     if self._integrator_decay_counter >= INTEGRATOR_DECAY_FRAMES:
       self._pid.i *= float(np.interp(CS.vEgo, INTEGRATOR_DECAY_BP, INTEGRATOR_DECAY_V))
 
-    # turn-exit hard reset: 0.95 decay rolling max over 1s; if max was real-turn and
-    # current |desired| is near zero, bleed I aggressively
+    # turn-exit hard reset: gated on not-freeze for same reason as above
     self._max_recent_desired_curvature = max(abs(self._desired_curvature),
                                              self._max_recent_desired_curvature * 0.99)
-    if self._max_recent_desired_curvature > TURN_EXIT_TURN_THRESHOLD and abs(self._desired_curvature) < TURN_EXIT_NEAR_ZERO:
+    if not freeze_integrator and self._max_recent_desired_curvature > TURN_EXIT_TURN_THRESHOLD \
+       and abs(self._desired_curvature) < TURN_EXIT_NEAR_ZERO:
       self._pid.i *= TURN_EXIT_I_DECAY
     is_winding = abs(raw_output) > abs(self._prev_output_torque)
     slew_v = OUTPUT_SLEW_WIND_UP_V if is_winding else OUTPUT_SLEW_UNWIND_V
