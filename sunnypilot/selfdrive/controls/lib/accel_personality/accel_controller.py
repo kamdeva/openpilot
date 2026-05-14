@@ -39,6 +39,12 @@ DEFICIT_TO_FLOOR = 8.5
 COAST_DEADBAND = 1.0
 RAMP_OFF_RANGE = 5.0
 
+# SnG-launch cap: only fires when ego is leaving standstill AND lead is also slow.
+# Green-light / no-lead launches get full A_MAX. Steady-state cruise unaffected.
+SNG_EGO_MAX        = 2.0   # m/s — only cap when ego v below this
+SNG_LEAD_MAX       = 3.0   # m/s — only cap when lead v below this
+SNG_CAP_FLOOR      = 0.4   # min A_MAX scale when fully in regime
+
 A_MIN_TIGHTEN_RATE = 1.5
 A_MIN_RELAX_RATE = 0.6
 A_MAX_RATE = 0.8
@@ -59,11 +65,15 @@ class AccelPersonalityController:
     self._enabled = self.params.get_bool('AccelPersonalityEnabled')
 
     self._v_cruise = 0.0
+    self._lead_v = 0.0
+    self._lead_status = False
     self._a_min = -0.05
     self._a_max = 1.50
 
     self._cache_v: float | None = None
     self._cache_v_cruise: float | None = None
+    self._cache_sng: bool | None = None
+    self._cache_lead_v: float | None = None
     self._cache_a_min = self._a_min
     self._cache_a_max = self._a_max
 
@@ -77,6 +87,13 @@ class AccelPersonalityController:
         self._v_cruise = float(sm['carState'].vCruise) * (1000.0 / 3600.0)
       except Exception:
         pass
+      try:
+        lead = sm['radarState'].leadOne
+        self._lead_status = bool(lead.status)
+        self._lead_v = float(lead.vLead) if self._lead_status else 0.0
+      except Exception:
+        self._lead_status = False
+        self._lead_v = 0.0
 
     if self.frame % PARAM_REFRESH_FRAMES == 0:
       val = self.params.get('AccelPersonality')
@@ -126,13 +143,18 @@ class AccelPersonalityController:
 
   def get_accel_limits(self, v_ego: float) -> tuple[float, float]:
     v_ego = max(0.0, v_ego)
+    in_sng = self._lead_status and v_ego < SNG_EGO_MAX and self._lead_v < SNG_LEAD_MAX
     if (self._cache_v is not None
         and abs(self._cache_v - v_ego) < 0.01
-        and self._cache_v_cruise == self._v_cruise):
+        and self._cache_v_cruise == self._v_cruise
+        and self._cache_sng == in_sng
+        and (not in_sng or abs(self._cache_lead_v - self._lead_v) < 0.1)):
       return self._cache_a_min, self._cache_a_max
     self._cache_a_min, self._cache_a_max = self._step(v_ego)
     self._cache_v = v_ego
     self._cache_v_cruise = self._v_cruise
+    self._cache_sng = in_sng
+    self._cache_lead_v = self._lead_v
     return self._cache_a_min, self._cache_a_max
 
   def get_min_accel(self, v_ego: float) -> float:
@@ -146,9 +168,19 @@ class AccelPersonalityController:
       return 1.0
     return float(np.clip((self._v_cruise - v_ego) / RAMP_OFF_RANGE, 0.0, 1.0))
 
+  def _sng_launch_cap(self, v_ego: float) -> float:
+    # Only fires when ego is in SnG-launch regime AND lead is also slow.
+    # Green-light / no-lead launches get full A_MAX.
+    if not self._lead_status:
+      return 1.0
+    if v_ego >= SNG_EGO_MAX or self._lead_v >= SNG_LEAD_MAX:
+      return 1.0
+    # Scale linearly with lead speed: slower lead = lower cap.
+    return float(np.clip(self._lead_v / SNG_LEAD_MAX, SNG_CAP_FLOOR, 1.0))
+
   def _target_max(self, v_ego: float) -> float:
     base = float(np.interp(v_ego, A_MAX_BP, A_MAX_V[self._personality]))
-    return base * self._ramp_off(v_ego)
+    return base * self._ramp_off(v_ego) * self._sng_launch_cap(v_ego)
 
   def _target_min(self, v_ego: float) -> float:
     coast = float(np.interp(v_ego, COAST_DRAG_BP, COAST_DRAG_V[self._personality]))
