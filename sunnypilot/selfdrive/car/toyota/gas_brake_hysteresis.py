@@ -12,7 +12,7 @@ See the LICENSE.md file in the root directory for more details.
 # Hysteresis: while commanded accel sits in a tight band around zero, hold at
 # coast (0.0) so PCM does not flip modes for sub-noise-floor commands. Allow
 # crossing only when the new-side magnitude clearly exceeds the band.
-DEAD_BAND = 0.15  # m/s^2, half-width of the hold-at-coast region
+DEAD_BAND = 0.20  # m/s^2, half-width of the hold-at-coast region
 
 
 class GasBrakeHysteresis:
