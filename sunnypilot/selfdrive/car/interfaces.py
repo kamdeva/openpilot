@@ -76,7 +76,15 @@ def _wrap_toyota_gas_brake_hysteresis(CI: CarInterfaceBase) -> None:
 
   def apply(c, c_sp, now_nanos=None):
     raw = float(c.actuators.accel)
-    held = hyst.update(raw)
+    v_ego = float(CI.CS.out.vEgo) if CI.CS is not None else 10.0
+    lead_status = False
+    lead_a = 0.0
+    try:
+      lead_status = bool(c_sp.leadOne.status)
+      lead_a = float(c_sp.leadOne.aLeadK)
+    except Exception:
+      pass
+    held = hyst.update(raw, v_ego, lead_status, lead_a)
     if held == raw:
       return base_apply(c, c_sp, now_nanos)
     c_b = c.as_builder()
